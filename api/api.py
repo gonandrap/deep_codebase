@@ -649,8 +649,6 @@ async def get_processed_projects():
                             submittedAt=int(stats.st_mtime * 1000),
                             language=language
                         ))
-                            )
-                        )
                     else:
                         logger.warning(f"Could not parse project details from filename: {filename}")
                 except Exception as e:
