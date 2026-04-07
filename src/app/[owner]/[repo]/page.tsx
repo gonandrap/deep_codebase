@@ -1875,64 +1875,74 @@ IMPORTANT:
     // but keeping the main unmount cleanup in the other useEffect
   }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView]);
 
-  // Save wiki to server-side cache when generation is complete
+  // Save wiki to server-side cache whenever generatedPages updates
   useEffect(() => {
     const saveCache = async () => {
-      if (!isLoading &&
-          !error &&
-          wikiStructure &&
-          Object.keys(generatedPages).length > 0 &&
-          Object.keys(generatedPages).length >= wikiStructure.pages.length &&
-          !cacheLoadedSuccessfully.current) {
+      // Filter out pages that are still loading or have errors
+      const validGeneratedPages: Record<string, WikiPage> = {};
+      let hasRealContent = false;
 
-        const allPagesHaveContent = wikiStructure.pages.every(page =>
-          generatedPages[page.id] && generatedPages[page.id].content && generatedPages[page.id].content !== 'Loading...');
+      Object.entries(generatedPages).forEach(([id, page]) => {
+        const content = page.content;
+        // Only include pages that have actual generated content (not placeholders or errors)
+        if (content && 
+            content !== 'Loading...' && 
+            !content.startsWith('Error generating content:') &&
+            content.length > 50) {
+          validGeneratedPages[id] = page;
+          hasRealContent = true;
+        }
+      });
+      
+      if (!error && wikiStructure && hasRealContent) {
+        console.log(`Incremental cache save triggered for ${Object.keys(validGeneratedPages).length} valid pages...`);
 
-        if (allPagesHaveContent) {
-          console.log('Attempting to save wiki data to server cache via Next.js proxy');
-
-          try {
-            // Make sure wikiStructure has sections and rootSections
-            const structureToCache = {
-              ...wikiStructure,
-              sections: wikiStructure.sections || [],
-              rootSections: wikiStructure.rootSections || []
-            };
-            const dataToCache = {
-              repo: effectiveRepoInfo,
-              language: language,
-              comprehensive: isComprehensiveView,
-              wiki_structure: structureToCache,
-              generated_pages: generatedPages,
-              provider: selectedProviderState,
-              model: selectedModelState
-            };
-            const response = await fetch(`/api/wiki_cache`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(dataToCache),
-            });
-
-            if (response.ok) {
-              console.log('Wiki data successfully saved to server cache');
-            } else {
-              console.error('Error saving wiki data to server cache:', response.status, await response.text());
-            }
-          } catch (error) {
-            console.error('Error saving to server cache:', error);
-          }
+        try {
+          const structureToCache = {
+            ...wikiStructure,
+            sections: wikiStructure.sections || [],
+            rootSections: wikiStructure.rootSections || []
+          };
+          
+          // Combine previously generated pages with new valid ones
+          // This ensures we don't accidentally wipe out valid content
+          // if generatedPages somehow only has a subset
+          const dataToCache = {
+            repo: effectiveRepoInfo,
+            language: language,
+            comprehensive: isComprehensiveView,
+            wiki_structure: structureToCache,
+            generated_pages: validGeneratedPages,
+            provider: selectedProviderState,
+            model: selectedModelState
+          };
+          
+          await fetch(`/api/wiki_cache`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(dataToCache),
+          });
+        } catch (error) {
+          console.error('Error saving to server cache:', error);
         }
       }
     };
 
-    saveCache();
-  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView]);
+    // Debounce the save to avoid hammering the API
+    const timeoutId = setTimeout(saveCache, 2000);
+    return () => clearTimeout(timeoutId);
+  }, [error, wikiStructure, generatedPages, effectiveRepoInfo, language, isComprehensiveView, selectedProviderState, selectedModelState]);
 
   const handlePageSelect = (pageId: string) => {
-    if (currentPageId != pageId) {
-      setCurrentPageId(pageId)
+    if (currentPageId !== pageId) {
+      setCurrentPageId(pageId);
+      
+      // Check if this page needs to be generated
+      const page = wikiStructure?.pages.find(p => p.id === pageId);
+      if (page && !generatedPages[pageId]?.content && !pagesInProgress.has(pageId)) {
+        console.log(`Triggering generation for selected page: ${page.title}`);
+        generatePageContent(page, owner, repo);
+      }
     }
   };
 
@@ -2152,9 +2162,37 @@ IMPORTANT:
 
 
                   <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none">
-                    <Markdown
-                      content={generatedPages[currentPageId].content}
-                    />
+                    {generatedPages[currentPageId].content ? (
+                      <Markdown content={generatedPages[currentPageId].content} />
+                    ) : pagesInProgress.has(currentPageId) ? (
+                      <div className="flex flex-col items-center justify-center p-20 text-[var(--muted)]">
+                        <FaSync className="text-4xl animate-spin mb-4 text-[var(--accent-primary)]" />
+                        <p className="font-serif animate-pulse text-lg">
+                          Generating content with AI...
+                        </p>
+                        <p className="text-sm mt-2">
+                          This usually takes 30-60 seconds for complex pages.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center p-20 text-[var(--muted)] border-2 border-dashed border-[var(--border-color)] rounded-xl bg-[var(--background)]/50">
+                        <FaExclamationTriangle className="text-4xl mb-4 text-orange-400" />
+                        <p className="font-serif text-lg mb-4">
+                          This page hasn't been generated yet.
+                        </p>
+                        <button
+                          className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/90 text-white px-6 py-2.5 rounded-lg transition-all shadow-md flex items-center gap-2"
+                          onClick={() => {
+                            const page = wikiStructure?.pages.find(p => p.id === currentPageId);
+                            if (page) {
+                              generatePageContent(page, owner, repo);
+                            }
+                          }}
+                        >
+                          <FaSync className="text-sm" /> Generate Page Content
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {generatedPages[currentPageId].relatedPages.length > 0 && (

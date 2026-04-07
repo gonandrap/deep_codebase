@@ -424,13 +424,34 @@ async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str) 
     return None
 
 async def save_wiki_cache(data: WikiCacheRequest) -> bool:
-    """Saves wiki cache data to the file system."""
-    cache_path = get_wiki_cache_path(data.repo.owner, data.repo.repo, data.repo.type, data.language)
+    """Saves wiki cache data to the file system, merging with existing pages."""
+    # Ensure owner is handled for local repos
+    owner = data.repo.owner
+    if not owner and data.repo.type == "local":
+        owner = "none"
+        
+    cache_path = get_wiki_cache_path(owner, data.repo.repo, data.repo.type, data.language)
     logger.info(f"Attempting to save wiki cache. Path: {cache_path}")
     try:
+        # Load existing cache if it exists to merge pages
+        existing_pages = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    old_data = json.load(f)
+                    existing_pages = old_data.get("generated_pages", {})
+                    logger.info(f"Loaded {len(existing_pages)} existing pages from cache for merging.")
+            except Exception as e:
+                logger.warning(f"Could not load existing cache for merging: {e}")
+
+        # Merge existing pages with new ones
+        # New pages overwrite existing ones if IDs match
+        merged_pages = existing_pages.copy()
+        merged_pages.update(data.generated_pages)
+        
         payload = WikiCacheData(
             wiki_structure=data.wiki_structure,
-            generated_pages=data.generated_pages,
+            generated_pages=merged_pages,
             repo=data.repo,
             provider=data.provider,
             model=data.model
@@ -439,7 +460,7 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
         try:
             payload_json = payload.model_dump_json()
             payload_size = len(payload_json.encode('utf-8'))
-            logger.info(f"Payload prepared for caching. Size: {payload_size} bytes.")
+            logger.info(f"Payload prepared for caching. Size: {payload_size} bytes. Total pages: {len(merged_pages)}")
         except Exception as ser_e:
             logger.warning(f"Could not serialize payload for size logging: {ser_e}")
 
@@ -607,15 +628,27 @@ async def get_processed_projects():
                         language = parts[-1] # language is the last part
                         repo = "_".join(parts[2:-1]) # repo can contain underscores
 
-                        project_entries.append(
-                            ProcessedProjectEntry(
-                                id=filename,
-                                owner=owner,
-                                repo=repo,
-                                name=f"{owner}/{repo}",
-                                repo_type=repo_type,
-                                submittedAt=int(stats.st_mtime * 1000), # Convert to milliseconds
-                                language=language
+                        # Handle local paths specifically for better display
+                        display_name = f"{owner}/{repo}"
+                        if repo_type == "local":
+                            # For local repos, if owner is 'none', it's likely a hidden path in the filename
+                            # Reconstruct potential path if it starts with underscores
+                            actual_path = repo
+                            if repo.startswith("apps_"):
+                                actual_path = "/" + repo.replace("_", "/")
+                            elif owner == "none":
+                                actual_path = "/" + repo.replace("_", "/")
+                            display_name = actual_path
+
+                        project_entries.append(ProcessedProjectEntry(
+                            id=filename,
+                            owner=owner,
+                            repo=repo,
+                            name=display_name,
+                            repo_type=repo_type,
+                            submittedAt=int(stats.st_mtime * 1000),
+                            language=language
+                        ))
                             )
                         )
                     else:

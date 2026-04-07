@@ -572,6 +572,24 @@ This file contains...
             )
 
         # Process the response based on the provider
+        is_closed = False
+        async def safe_send(text):
+            nonlocal is_closed
+            if not is_closed:
+                try:
+                    await websocket.send_text(text)
+                except Exception:
+                    is_closed = True
+
+        async def safe_close():
+            nonlocal is_closed
+            if not is_closed:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+                is_closed = True
+
         try:
             if request.provider == "ollama":
                 # Get the response and handle it properly using the previously created api_kwargs
@@ -599,9 +617,9 @@ This file contains...
 
                     if isinstance(text, str) and text and not text.startswith('model=') and not text.startswith('created_at='):
                         clean_text = text.replace('<think>', '').replace('</think>', '')
-                        await websocket.send_text(clean_text)
+                        await safe_send(clean_text)
                 # Explicitly close the WebSocket connection after the response is complete
-                await websocket.close()
+                await safe_close()
             elif request.provider == "openrouter":
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
@@ -609,15 +627,15 @@ This file contains...
                     response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
                     # Handle streaming response from OpenRouter
                     async for chunk in response:
-                        await websocket.send_text(chunk)
+                        await safe_send(chunk)
                     # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
+                    await safe_close()
                 except Exception as e_openrouter:
                     logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
                     error_msg = f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                    await websocket.send_text(error_msg)
+                    await safe_send(error_msg)
                     # Close the WebSocket connection after sending the error message
-                    await websocket.close()
+                    await safe_close()
             elif request.provider == "openai":
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
@@ -631,24 +649,24 @@ This file contains...
                             if delta is not None:
                                 text = getattr(delta, "content", None)
                                 if text is not None:
-                                    await websocket.send_text(text)
+                                    await safe_send(text)
                     # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
+                    await safe_close()
                 except Exception as e_openai:
                     logger.error(f"Error with Openai API: {str(e_openai)}")
                     error_msg = f"\nError with Openai API: {str(e_openai)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
-                    await websocket.send_text(error_msg)
+                    await safe_send(error_msg)
                     # Close the WebSocket connection after sending the error message
-                    await websocket.close()
+                    await safe_close()
             elif request.provider == "bedrock":
                 try:
                     logger.info("Making AWS Bedrock API call")
                     response = await model.acall(api_kwargs=api_kwargs, model_type=ModelType.LLM)
                     if isinstance(response, str):
-                        await websocket.send_text(response)
+                        await safe_send(response)
                     else:
-                        await websocket.send_text(str(response))
-                    await websocket.close()
+                        await safe_send(str(response))
+                    await safe_close()
                 except Exception as e_bedrock:
                     logger.error(f"Error with AWS Bedrock API: {str(e_bedrock)}")
                     error_msg = (
@@ -656,8 +674,8 @@ This file contains...
                         "Please check that you have set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
                         "environment variables with valid credentials."
                     )
-                    await websocket.send_text(error_msg)
-                    await websocket.close()
+                    await safe_send(error_msg)
+                    await safe_close()
             elif request.provider == "azure":
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
@@ -671,15 +689,15 @@ This file contains...
                             if delta is not None:
                                 text = getattr(delta, "content", None)
                                 if text is not None:
-                                    await websocket.send_text(text)
+                                    await safe_send(text)
                     # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
+                    await safe_close()
                 except Exception as e_azure:
                     logger.error(f"Error with Azure AI API: {str(e_azure)}")
                     error_msg = f"\nError with Azure AI API: {str(e_azure)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                    await websocket.send_text(error_msg)
+                    await safe_send(error_msg)
                     # Close the WebSocket connection after sending the error message
-                    await websocket.close()
+                    await safe_close()
             elif request.provider == "dashscope":
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
@@ -691,9 +709,9 @@ This file contains...
                     # generator of plain text chunks
                     async for text in response:
                         if text:
-                            await websocket.send_text(text)
+                            await safe_send(text)
                     # Explicitly close the WebSocket connection after the response is complete
-                    await websocket.close()
+                    await safe_close()
                 except Exception as e_dashscope:
                     logger.error(f"Error with Dashscope API: {str(e_dashscope)}")
                     error_msg = (
@@ -701,16 +719,25 @@ This file contains...
                         "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
                         "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
                     )
-                    await websocket.send_text(error_msg)
+                    await safe_send(error_msg)
                     # Close the WebSocket connection after sending the error message
-                    await websocket.close()
+                    await safe_close()
             else:
+                # Initialize Google Generative AI model
+                model = genai.GenerativeModel(
+                    model_name=model_config["model"],
+                    generation_config={
+                        "temperature": model_config["temperature"],
+                        "top_p": model_config["top_p"],
+                        "top_k": model_config["top_k"]
+                    }
+                )
                 # Google Generative AI (default provider)
                 response = model.generate_content(prompt, stream=True)
                 for chunk in response:
                     if hasattr(chunk, 'text'):
-                        await websocket.send_text(chunk.text)
-                await websocket.close()
+                        await safe_send(chunk.text)
+                await safe_close()
 
         except Exception as e_outer:
             logger.error(f"Error in streaming response: {str(e_outer)}")
@@ -751,7 +778,7 @@ This file contains...
                             text = getattr(chunk, 'response', None) or getattr(chunk, 'text', None) or str(chunk)
                             if text and not text.startswith('model=') and not text.startswith('created_at='):
                                 text = text.replace('<think>', '').replace('</think>', '')
-                                await websocket.send_text(text)
+                                await safe_send(text)
                     elif request.provider == "openrouter":
                         try:
                             # Create new api_kwargs with the simplified prompt
@@ -767,11 +794,11 @@ This file contains...
 
                             # Handle streaming fallback_response from OpenRouter
                             async for chunk in fallback_response:
-                                await websocket.send_text(chunk)
+                                await safe_send(chunk)
                         except Exception as e_fallback:
                             logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
                             error_msg = f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                            await websocket.send_text(error_msg)
+                            await safe_send(error_msg)
                     elif request.provider == "openai":
                         try:
                             # Create new api_kwargs with the simplified prompt
@@ -788,11 +815,11 @@ This file contains...
                             # Handle streaming fallback_response from Openai
                             async for chunk in fallback_response:
                                 text = chunk if isinstance(chunk, str) else getattr(chunk, 'text', str(chunk))
-                                await websocket.send_text(text)
+                                await safe_send(text)
                         except Exception as e_fallback:
                             logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
                             error_msg = f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
-                            await websocket.send_text(error_msg)
+                            await safe_send(error_msg)
                     elif request.provider == "bedrock":
                         try:
                             fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
@@ -807,9 +834,9 @@ This file contains...
                             )
 
                             if isinstance(fallback_response, str):
-                                await websocket.send_text(fallback_response)
+                                await safe_send(fallback_response)
                             else:
-                                await websocket.send_text(str(fallback_response))
+                                await safe_send(str(fallback_response))
                         except Exception as e_fallback:
                             logger.error(
                                 f"Error with AWS Bedrock API fallback: {str(e_fallback)}"
@@ -819,7 +846,7 @@ This file contains...
                                 "Please check that you have set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
                                 "environment variables with valid credentials."
                             )
-                            await websocket.send_text(error_msg)
+                            await safe_send(error_msg)
                     elif request.provider == "azure":
                         try:
                             # Create new api_kwargs with the simplified prompt
@@ -841,11 +868,11 @@ This file contains...
                                     if delta is not None:
                                         text = getattr(delta, "content", None)
                                         if text is not None:
-                                            await websocket.send_text(text)
+                                            await safe_send(text)
                         except Exception as e_fallback:
                             logger.error(f"Error with Azure AI API fallback: {str(e_fallback)}")
                             error_msg = f"\nError with Azure AI API fallback: {str(e_fallback)}\n\nPlease check that you have set the AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_VERSION environment variables with valid values."
-                            await websocket.send_text(error_msg)
+                            await safe_send(error_msg)
                     elif request.provider == "dashscope":
                         try:
                             # Create new api_kwargs with the simplified prompt
@@ -864,7 +891,7 @@ This file contains...
                             # generator of text chunks
                             async for text in fallback_response:
                                 if text:
-                                    await websocket.send_text(text)
+                                    await safe_send(text)
                         except Exception as e_fallback:
                             logger.error(
                                 f"Error with Dashscope API fallback: {str(e_fallback)}"
@@ -874,16 +901,16 @@ This file contains...
                                 "Please check that you have set the DASHSCOPE_API_KEY (and optionally "
                                 "DASHSCOPE_WORKSPACE_ID) environment variables with valid values."
                             )
-                            await websocket.send_text(error_msg)
+                            await safe_send(error_msg)
                     else:
                         # Google Generative AI fallback (default provider)
                         model_config = get_model_config(request.provider, request.model)
                         fallback_model = genai.GenerativeModel(
                             model_name=model_config["model_kwargs"]["model"],
                             generation_config={
-                                "temperature": model_config["model_kwargs"].get("temperature", 0.7),
-                                "top_p": model_config["model_kwargs"].get("top_p", 0.8),
-                                "top_k": model_config["model_kwargs"].get("top_k", 40),
+                                "temperature": model_config["temperature"],
+                                "top_p": model_config["top_p"],
+                                "top_k": model_config["top_k"],
                             },
                         )
 
@@ -892,17 +919,18 @@ This file contains...
                         )
                         for chunk in fallback_response:
                             if hasattr(chunk, "text"):
-                                await websocket.send_text(chunk.text)
+                                await safe_send(chunk.text)
+                    await safe_close()
                 except Exception as e2:
                     logger.error(f"Error in fallback streaming response: {str(e2)}")
-                    await websocket.send_text(f"\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts.")
+                    await safe_send(f"\nI apologize, but your request is too large for me to process. Please try a shorter query or break it into smaller parts.")
                     # Close the WebSocket connection after sending the error message
-                    await websocket.close()
+                    await safe_close()
             else:
                 # For other errors, return the error message
-                await websocket.send_text(f"\nError: {error_message}")
+                await safe_send(f"\nError: {error_message}")
                 # Close the WebSocket connection after sending the error message
-                await websocket.close()
+                await safe_close()
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
